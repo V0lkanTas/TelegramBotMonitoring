@@ -1,0 +1,103 @@
+#!/bin/bash
+
+# Configuration
+TELEGRAM_BOT_TOKEN="<Your token here>"
+TELEGRAM_CHAT_ID="<Your chatID here>"
+THRESHOLD=80
+CHECK_INTERVAL=15  # 5 seconds
+
+# Server identifier
+SERVER_NAME="<Server hostname for example gitea>"  # Set differently for each server
+
+# Get CPU core count
+CPU_CORES=$(nproc)
+
+send_telegram_message() {
+    local message="$1"
+    local prefix="[$SERVER_NAME]"
+    message="$prefix $message"
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=${TELEGRAM_CHAT_ID}" \
+        -d "text=${message}" \
+        -d "parse_mode=HTML"
+}
+
+monitor_system() {
+    while true; do
+        # CPU Load Check (using 1-minute load average)
+        load_1min=$(uptime | awk -F'load average: ' '{print $2}' | cut -d, -f1)
+        load_1min=${load_1min%.*}  # Convert to integer
+        if [ "$load_1min" -gt "$CPU_CORES" ]; then
+            send_telegram_message "🚨 1 Minute LOAD: ${load_1min} (cores: ${CPU_CORES})"
+        fi
+
+        # Memory Check
+        memory_usage=$(free | grep Mem | awk '{print ($3/$2) * 100.0}' | cut -d. -f1)
+        if [ "$memory_usage" -gt "$THRESHOLD" ]; then
+            send_telegram_message "🚨 HIGH MEMORY: ${memory_usage}%"
+        fi
+
+        # Disk Check
+        disk_usage=$(df -h / | awk 'NR==2 {print $5}' | cut -d% -f1)
+        if [ "$disk_usage" -gt "$THRESHOLD" ]; then
+            send_telegram_message "🚨 HIGH DISK: ${disk_usage}%"
+        fi
+
+        # IO Check - using two samples for actual interval measurement
+        io_usage=$(iostat -x 1 2 | grep "sda" | tail -n1 | awk '{print $NF}' | cut -d. -f1)
+        if [ -n "$io_usage" ] && [ "$io_usage" -eq "$io_usage" ] 2>/dev/null; then
+            if [ "$io_usage" -gt "$THRESHOLD" ]; then
+                send_telegram_message "🚨 I/O: ${io_usage}%"
+            fi
+        fi
+
+
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+monitor_ssh() {
+    tail -Fn0 /var/log/auth.log | while read line; do
+        if [ -z "$line" ]; then
+            logger "Telegram monitor: Empty line received"
+            continue
+        fi
+
+	# Added Space after Accepted to differentiate it from:
+	# PubkeyAcceptedAlgorithms
+        if echo "$line" | grep -q "Accepted "; then
+            # Immediately save the line and log it
+            captured_line="$line"
+            logger "Telegram monitor: Processing login: $captured_line"
+
+            # Process the saved line
+            user=$(echo "$captured_line" | grep -oP '(?<=for )\w+')
+            ip=$(echo "$captured_line" | grep -oP '(?<=from )[0-9\.]+')
+
+            if [ -z "$user" ] || [ -z "$ip" ]; then
+                logger "Telegram monitor: WARNING - Malformed login. User='$user' IP='$ip'"
+                send_telegram_message "⚠️ WARNING: Malformed login detected. Check syslog."
+                continue
+            fi
+
+            send_telegram_message "🔐 SSH Login: $user from $ip on ${SERVER_NAME}"
+        fi
+    done
+}
+
+# Start monitoring
+send_telegram_message "🟢 Server monitoring started on ${SERVER_NAME}"
+
+# Run monitors in parallel
+monitor_system &
+monitor_ssh &
+
+# Keep script running and handle termination gracefully
+cleanup() {
+     send_telegram_message "⚠️ Monitoring script stopped at $(date '+%Y-%m-%d %H:%M:%S')"
+     exit 0
+}
+
+# Set up trap for script termination
+trap cleanup SIGTERM SIGINT SIGHUP
+wait
