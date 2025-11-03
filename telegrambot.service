@@ -1,0 +1,32 @@
+#!/sbin/openrc-run                                                                            
+
+# I have created to run and stop the telegram bot as a service on openrc it makes my life much easier. You dont have to do this but if you do here is how I did it.
+
+name="telegrambot"
+description="Telegram Bot Service"
+command="/root/telegrambot"
+command_background="yes"
+pidfile="/root/telegrambot.pid"
+command_user="root"
+start_stop_daemon_args="--stdout /root/telegrambot.log --stderr /root/telegrambot.log"
+
+depend() {
+    need net
+    after logger
+}
+
+stop() {
+    ebegin "Stopping ${name}"
+    if [ -f "${pidfile}" ]; then
+        local pid=$(cat "${pidfile}")
+        local pgid=$(ps -o pgid= -p ${pid} 2>/dev/null | tr -d ' ')
+        if [ -n "${pgid}" ]; then
+            # Kill entire process group
+            pkill -TERM -g ${pgid}
+            sleep 1
+        fi
+    fi
+    start-stop-daemon --stop --pidfile "${pidfile}" --signal TERM --retry 5
+    eend $?
+}
+
