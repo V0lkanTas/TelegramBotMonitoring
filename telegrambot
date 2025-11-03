@@ -1,13 +1,15 @@
 #!/bin/bash
 
 # Configuration
+SERVER_NAME="<Server hostname for example gitea>"  # Set differently for each server
 TELEGRAM_BOT_TOKEN="<Your token here>"
 TELEGRAM_CHAT_ID="<Your chatID here>"
 THRESHOLD=80
 CHECK_INTERVAL=15  # 5 seconds
 
-# Server identifier
-SERVER_NAME="<Server hostname for example gitea>"  # Set differently for each server
+#Firewall Configs# Keep script running and handle termination gracefully
+FIREWALL_CHECK_INTERVAL=15
+RULES_SNAPSHOT="/var/tmp/iptables_snapshot.txt"
 
 # Get CPU core count
 CPU_CORES=$(nproc)
@@ -85,19 +87,69 @@ monitor_ssh() {
     done
 }
 
+# Function to get current iptables state (without counters)
+get_iptables_state() {
+    # Get rules with interfaces but strip the packet/byte counter columns
+    iptables -L -n -v --line-numbers | awk '
+        # For Chain lines, only keep "Chain CHAINNAME"
+        /^Chain/ { 
+            print $1, $2
+            next
+        }
+        # Keep header lines and empty lines as-is
+        /^num/ || /^$/ { print; next }
+        # For rule lines, remove columns 2 and 3 (pkts and bytes)
+        { $2=""; $3=""; print }
+    '
+}
+
+monitor_firewall_rules() {
+    # Create initial snapshot if it doesn't exist
+    if [ ! -f "$RULES_SNAPSHOT" ]; then
+        get_iptables_state > "$RULES_SNAPSHOT"
+        logger "Telegram monitor: Initial iptables snapshot created"
+    fi
+    
+    while true; do
+        # Get current state
+        current_state=$(get_iptables_state)
+        
+        # Compare with snapshot
+        if ! diff -q <(cat "$RULES_SNAPSHOT") <(echo "$current_state") > /dev/null; then
+            # Rules changed! Get the diff
+            changes=$(diff -u "$RULES_SNAPSHOT" <(echo "$current_state"))
+            
+            logger "Telegram monitor: IPTables rules changed"
+            
+            # Send alert with changes
+            send_telegram_message "⚠️ IPTables rules changed!
+
+<pre>${changes}</pre>"
+            
+            # Update snapshot
+            echo "$current_state" > "$RULES_SNAPSHOT"
+        fi
+        
+        sleep "$FIREWALL_CHECK_INTERVAL"
+    done
+}
+
+# Keep script running and handle termination gracefully
+cleanup() {
+     send_telegram_message "⚠️ Monitoring script stopped at $(date '+%Y-%m-%d %H:%M:%S')"
+     kill $(jobs -p) 2>/dev/null
+     exit 0
+}
+
+# Set up trap for script termination
+trap cleanup SIGTERM SIGINT SIGHUP
+
 # Start monitoring
 send_telegram_message "🟢 Server monitoring started on ${SERVER_NAME}"
 
 # Run monitors in parallel
 monitor_system &
 monitor_ssh &
+monitor_firewall_rules &
 
-# Keep script running and handle termination gracefully
-cleanup() {
-     send_telegram_message "⚠️ Monitoring script stopped at $(date '+%Y-%m-%d %H:%M:%S')"
-     exit 0
-}
-
-# Set up trap for script termination
-trap cleanup SIGTERM SIGINT SIGHUP
 wait
