@@ -7,12 +7,29 @@ TELEGRAM_CHAT_ID="<Your chatID here>"
 THRESHOLD=80
 CHECK_INTERVAL=15  # 5 seconds
 
-#Firewall Configs# Keep script running and handle termination gracefully
+#Firewall Configs
 FIREWALL_CHECK_INTERVAL=15
 RULES_SNAPSHOT="/var/tmp/iptables_snapshot.txt"
 
 # Get CPU core count
 CPU_CORES=$(nproc)
+
+# Log monitoring configuration
+case "$SERVER_NAME" in
+    "reverse-proxy")
+        declare -A LOG_PATTERNS=(
+            ["/path/to/your/logs/httpsAccess.log"]="\"status\":(4[0-9]{2}|5[0-9]{2})"
+        )
+        ;;
+    "budget")
+        declare -A LOG_PATTERNS=(
+            ["/path/to/your/logs/panic.log"]=".*" # Return all new entries
+        )
+        ;;
+    "Gitea")
+        # Add Gitea logs here if needed later
+        ;;
+esac
 
 send_telegram_message() {
     local message="$1"
@@ -134,6 +151,31 @@ monitor_firewall_rules() {
     done
 }
 
+monitor_logs() {
+    for log_file in "${!LOG_PATTERNS[@]}"; do
+        if [ ! -f "$log_file" ]; then
+            logger "Telegram monitor: Log file $log_file not found, skipping"
+            continue
+        fi
+        
+        pattern="${LOG_PATTERNS[$log_file]}"
+        
+        tail -Fn0 "$log_file" | grep --line-buffered -E "$pattern" | while read line; do
+            # For panic.log, truncate the stack field
+            if [[ "$log_file" == *"panic.log"* ]]; then
+                formatted=$(echo "$line" | jq -r 'del(.stack) | .' 2>/dev/null || echo "$line")
+                send_telegram_message "🔴 Log Alert [$log_file]:
+<pre>$formatted</pre>
+(stack trace truncated - check server logs)"
+            else
+                formatted=$(echo "$line" | jq -r '.' 2>/dev/null || echo "$line")
+                send_telegram_message "🔴 Log Alert [$log_file]:
+<pre>$formatted</pre>"
+            fi
+        done &
+    done
+}
+
 # Keep script running and handle termination gracefully
 cleanup() {
      send_telegram_message "⚠️ Monitoring script stopped at $(date '+%Y-%m-%d %H:%M:%S')"
@@ -151,5 +193,6 @@ send_telegram_message "🟢 Server monitoring started on ${SERVER_NAME}"
 monitor_system &
 monitor_ssh &
 monitor_firewall_rules &
+monitor_logs &
 
 wait
